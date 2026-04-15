@@ -1,0 +1,7 @@
+What type of irradiation was employed, and what are its characteristics?
+What is the type or name of the machine used to generate the radiation beams?
+What type of biological tissue was irradiated?
+Was the FLASH effect observed under the specified irradiation conditions?
+What types of irradiation were utilized, and what are their characteristics, if described? These may include: particle type, radiation energy, maximum dose, average dose rate, instantaneous dose rate, pulse repetition frequency, and dose per pulse.
+For each type of beam, which biological tissues were irradiated?
+For each combination of beam type and irradiated biological tissue, was the FLASH effect observed or not?
