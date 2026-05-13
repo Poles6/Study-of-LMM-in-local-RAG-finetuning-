@@ -16,6 +16,7 @@ Diferencias con interfaz_ollama.py:
 
 import json
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import List, Dict, Tuple
@@ -27,8 +28,8 @@ import PyPDF2
 # ── Configuración ──────────────────────────────────────────────────────────────
 
 DATASET_PATH = Path("dataset.jsonl")
-CHUNK_SIZE    = 500   # caracteres máximos por chunk
-TOP_K_CHUNKS  = 4     # chunks a pasar al modelo por pregunta
+CHUNK_SIZE    = 800   # caracteres máximos por chunk
+TOP_K_CHUNKS  = 6     # chunks a pasar al modelo por pregunta
 MAX_ANS_TOKENS = 300
 
 SYSTEM_PROMPT = (
@@ -117,7 +118,7 @@ def _rag_prompt(question: str, evidence: List[Dict]) -> str:
         "Responde en 1-3 frases. Al final añade en una línea nueva: "
         '"CITAS: <ids separados por comas>"\n\n'
         f"Fragmentos:\n{context}\n\n"
-        f"Pregunta: {question}\nRespuesta:"
+        f"Pregunta: {question}\n"
     )
 
 
@@ -125,82 +126,154 @@ def _ask_rag(question: str, chunks: List[Dict], model: str) -> Tuple[str, List[D
     evidence = _retrieve(question, chunks)
     prompt = _rag_prompt(question, evidence)
     try:
-        resp = ollama.generate(
+        resp = ollama.chat(
             model=model,
-            prompt=prompt,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
             options={"temperature": 0.1, "num_predict": MAX_ANS_TOKENS},
-            system=SYSTEM_PROMPT,
         )
-        raw = resp.response.strip() if hasattr(resp, "response") else str(resp).strip()
+        raw = resp.message.content.strip() if hasattr(resp, "message") else str(resp).strip()
     except Exception as e:
+        print(f"[RAG error]: {e}")
         return f"[Error: {e}]", evidence
 
     answer = raw
+    # Buscar y extraer la sección de respuesta antes de CITAS
     if "CITAS:" in raw:
         parts = raw.split("CITAS:")
         answer = parts[0].strip()
-        cited = {cid.strip() for cid in parts[1].split(",")}
-        filtered = [e for e in evidence if e["chunk_id"] in cited]
-        evidence = filtered if filtered else evidence
-
+        # Extraer IDs citados
+        cited_str = parts[1].strip() if len(parts) > 1 else ""
+        if cited_str and cited_str.lower() != "none":
+            cited = {cid.strip() for cid in cited_str.split(",") if cid.strip()}
+            filtered = [e for e in evidence if e["chunk_id"] in cited]
+            if filtered:
+                evidence = filtered
+    
+    # Validar que tenemos una respuesta real
+    if not answer or answer.startswith("[Error"):
+        return answer, evidence
+    
     return answer, evidence
 
 
 # ── Auto-generación de Q&A adicionales ───────────────────────────────────────
 
-def _auto_generate_qa(chunks: List[Dict], model: str, n: int) -> List[Tuple[str, str, List[Dict]]]:
-    """Pide al modelo que genere n pares Q&A basados en el artículo."""
-    # Pasamos los primeros chunks como contexto
-    context = "\n\n".join(f"[{c['chunk_id']}]: {c['text']}" for c in chunks[:8])
-    prompt = (
-        f"A partir del artículo científico que aparece a continuación, genera exactamente {n} pares "
-        "de pregunta y respuesta.\n"
-        "Incluye al menos 1 pregunta cuya respuesta NO aparezca en el texto "
-        '(respuesta: "No se indica en el documento.").\n\n'
-        "Formato OBLIGATORIO — repite el bloque {n} veces, separados por ---:\n"
-        "Q: <pregunta>\n"
-        "A: <respuesta en 1-2 frases>\n"
-        "CITAS: <chunk_id1, chunk_id2 o 'none'>\n"
-        "---\n\n"
-        f"Artículo:\n{context}\n\n"
-        f"Genera {n} pares ahora:"
-    )
-    try:
-        resp = ollama.generate(
-            model=model,
-            prompt=prompt,
-            options={"temperature": 0.3, "num_predict": 1000},
-            system=SYSTEM_PROMPT,
-        )
-        raw = resp.response.strip() if hasattr(resp, "response") else ""
-    except Exception as e:
-        print(f"[Auto-gen error]: {e}")
-        return []
-
+def _parse_qa_blocks(raw: str, chunk_map: Dict) -> List[Tuple[str, str, List[Dict]]]:
+    """Parsea bloques Q/A/CITAS de un texto, robusto a markdown y separadores variables."""
     results = []
-    chunk_map = {c["chunk_id"]: c for c in chunks}
-    for block in raw.split("---"):
-        block = block.strip()
-        if not block:
+    
+    # Quitar markdown (** ** y * *)
+    text = re.sub(r'\*+', '', raw)
+    
+    # Dividir el texto por marcadores Q: (con o sin numeración previa)
+    # Esto encuentra todas las preguntas, sin depender de "---" como separador
+    blocks = re.split(r'(?:^|\n)\s*(?:\d+[\.\)]\s*)?Q\s*[:\.]', text, flags=re.IGNORECASE)
+    
+    for block in blocks[1:]:  # Saltamos el texto inicial antes del primer Q:
+        # Buscar A: dentro del bloque
+        a_split = re.split(r'\n\s*A\s*[:\.]', block, maxsplit=1, flags=re.IGNORECASE)
+        if len(a_split) < 2:
             continue
-        q_m = re.search(r'Q:\s*(.+)', block)
-        a_m = re.search(r'A:\s*(.+)', block)
-        c_m = re.search(r'CITAS:\s*(.+)', block)
-        if not (q_m and a_m):
+        
+        question = a_split[0].strip()
+        rest = a_split[1]
+        
+        # Buscar CITAS: opcional
+        c_split = re.split(r'\n\s*CITAS?\s*[:\.]', rest, maxsplit=1, flags=re.IGNORECASE)
+        answer = c_split[0].strip()
+        # Limpiar separadores residuales
+        answer = re.sub(r'\n+---+\s*$', '', answer).strip()
+        
+        cited_str = ""
+        if len(c_split) > 1:
+            cited_str = c_split[1].split('\n')[0].strip()
+            cited_str = re.sub(r'---+\s*$', '', cited_str).strip()
+        
+        # Validación mínima
+        if not question or not answer or len(answer) < 5:
             continue
-        question = q_m.group(1).strip()
-        answer   = a_m.group(1).strip()
-        cited_ids = (
-            [cid.strip() for cid in c_m.group(1).split(",") if cid.strip() != "none"]
-            if c_m else []
-        )
-        evidence = [
-            {"chunk_id": cid, "text": chunk_map[cid]["text"], "score": None}
-            for cid in cited_ids if cid in chunk_map
-        ]
+        
+        # Procesar citas
+        evidence = []
+        if cited_str and cited_str.lower() not in ('none', 'ninguno', 'ninguna', 'n/a', ''):
+            cited_ids = [cid.strip() for cid in cited_str.split(",") if cid.strip()]
+            evidence = [
+                {"chunk_id": cid, "text": chunk_map[cid]["text"], "score": None}
+                for cid in cited_ids if cid in chunk_map
+            ]
+        
         results.append((question, answer, evidence))
-
+    
     return results
+
+
+def _auto_generate_qa(chunks: List[Dict], model: str, n: int) -> List[Tuple[str, str, List[Dict]]]:
+    """Genera n pares Q&A en batches pequeños para mayor fiabilidad."""
+    if n <= 0:
+        return []
+    
+    BATCH_SIZE = 5  # Batches pequeños = más fiable que pedir 10 de golpe
+    chunk_map = {c["chunk_id"]: c for c in chunks}
+    context = "\n\n".join(f"[{c['chunk_id']}]: {c['text']}" for c in chunks[:8])
+    
+    all_results: List[Tuple[str, str, List[Dict]]] = []
+    remaining = n
+    batch_idx = 0
+    
+    while remaining > 0:
+        batch_idx += 1
+        this_batch = min(BATCH_SIZE, remaining)
+        
+        # Nota: TODAS las líneas con {variables} llevan prefijo f
+        prompt = (
+            f"A partir del artículo científico, genera exactamente {this_batch} pares de pregunta y respuesta.\n"
+            "Las respuestas deben basarse SOLO en los fragmentos del artículo.\n"
+            'Si la respuesta no está en el artículo, escribe: "No se indica en el documento."\n\n'
+            "FORMATO OBLIGATORIO (sin numeración, sin negrita, sin markdown):\n"
+            "Q: pregunta aquí\n"
+            "A: respuesta aquí en 1-2 frases\n"
+            "CITAS: chunk_id1, chunk_id2\n\n"
+            "Q: otra pregunta\n"
+            "A: otra respuesta\n"
+            "CITAS: chunk_id3\n\n"
+            f"Artículo:\n{context}\n\n"
+            f"Genera ahora exactamente {this_batch} pares en el formato indicado:"
+        )
+        
+        try:
+            resp = ollama.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"temperature": 0.4, "num_predict": 1200},
+            )
+            raw = resp.message.content.strip() if hasattr(resp, "message") else ""
+        except Exception as e:
+            print(f"[Auto-gen batch {batch_idx} error]: {e}")
+            break
+        
+        if not raw:
+            print(f"[Auto-gen batch {batch_idx}] respuesta vacía del modelo")
+            break
+        
+        parsed = _parse_qa_blocks(raw, chunk_map)
+        print(f"  Batch {batch_idx}: {len(parsed)}/{this_batch} parseadas correctamente")
+        
+        if len(parsed) == 0:
+            # Si no se parseó nada, no insistir (probablemente formato muy raro)
+            print(f"  [Aviso] El modelo no respetó el formato. Output recibido:\n{raw[:300]}…")
+            break
+        
+        all_results.extend(parsed)
+        remaining -= len(parsed)
+    
+    print(f"  Total auto-generadas: {len(all_results)}/{n}")
+    return all_results
 
 
 # ── Dataset JSONL ─────────────────────────────────────────────────────────────
@@ -233,6 +306,8 @@ def _clear_dataset() -> str:
 # ── Proceso principal ─────────────────────────────────────────────────────────
 
 def process_document(doc_file, q_file, model, n_auto, progress=gr.Progress()):
+    start_time = time.time()
+    
     if not doc_file or not model:
         return "⚠️ Necesitas subir un documento y seleccionar un modelo.", _dataset_stats()
 
@@ -246,13 +321,19 @@ def process_document(doc_file, q_file, model, n_auto, progress=gr.Progress()):
     questions  = _read_questions(q_file) if q_file else []
 
     entries    = []
-    log_lines  = [f"**Artículo:** `{article_id}` · {len(chunks)} chunks · {len(questions)} preguntas del archivo"]
+    log_lines  = [
+        f"**Artículo:** `{article_id}` · {len(chunks)} chunks · {len(questions)} preguntas",
+        "",
+    ]
     total      = len(questions) + (1 if n_auto > 0 else 0)
 
     # ── Preguntas del archivo ──────────────────────────────────────────────────
     for i, question in enumerate(questions):
+        q_start = time.time()
         progress(i / max(total, 1), desc=f"Pregunta {i+1}/{len(questions)}…")
         answer, evidence = _ask_rag(question, chunks, model)
+        q_elapsed = time.time() - q_start
+        
         entries.append({
             "id":         f"{article_id}_q{i:03d}_{uuid.uuid4().hex[:4]}",
             "article_id": article_id,
@@ -267,12 +348,17 @@ def process_document(doc_file, q_file, model, n_auto, progress=gr.Progress()):
             },
         })
         status = "✅" if not answer.startswith("[Error") else "❌"
-        log_lines.append(f"{status} **Q:** {question[:70]}\n   **A:** {answer[:100]}")
+        q_text = question[:70] + "…" if len(question) > 70 else question
+        a_text = answer[:100] + "…" if len(answer) > 100 else answer
+        log_lines.append(f"{status} **Q:** {q_text}\n   **A:** {a_text}\n   ⏱️ {q_elapsed:.1f}s")
 
     # ── Auto-generación ────────────────────────────────────────────────────────
     if n_auto > 0:
+        auto_start = time.time()
         progress(len(questions) / max(total, 1), desc=f"Auto-generando {n_auto} Q&A…")
         auto_pairs = _auto_generate_qa(chunks, model, n_auto)
+        auto_elapsed = time.time() - auto_start
+        
         for i, (q, a, ev) in enumerate(auto_pairs):
             entries.append({
                 "id":         f"{article_id}_auto{i:03d}_{uuid.uuid4().hex[:4]}",
@@ -287,13 +373,22 @@ def process_document(doc_file, q_file, model, n_auto, progress=gr.Progress()):
                     "prompt_version":  "v1_auto",
                 },
             })
-            log_lines.append(f"🤖 **[auto] Q:** {q[:70]}\n   **A:** {a[:100]}")
-        log_lines.append(f"_Auto-generados: {len(auto_pairs)}/{n_auto} parseados correctamente_")
+            q_text = q[:70] + "…" if len(q) > 70 else q
+            a_text = a[:100] + "…" if len(a) > 100 else a
+            log_lines.append(f"🤖 **[auto] Q:** {q_text}\n   **A:** {a_text}")
+        
+        log_lines.append(f"_Auto-generados: {len(auto_pairs)}/{n_auto} · ⏱️ {auto_elapsed:.1f}s_")
 
     progress(1.0, desc="Guardando…")
+    save_start = time.time()
     _append_entries(entries)
+    save_elapsed = time.time() - save_start
 
-    log_lines.insert(1, f"**Añadidos:** {len(entries)} ejemplos nuevos\n")
+    total_elapsed = time.time() - start_time
+    
+    # Insertar sumario al principio
+    log_lines.insert(2, f"**✅ Añadidos:** {len(entries)} ejemplos nuevos · ⏱️ **Total: {total_elapsed:.1f}s** (guardar: {save_elapsed:.1f}s)\n")
+    
     return "\n\n".join(log_lines), _dataset_stats()
 
 
@@ -340,6 +435,7 @@ el dataset de forma incremental. Cuando estés listo, ejecuta `finetune_qlora.py
             fn=process_document,
             inputs=[doc_in, q_in, model_dd, n_auto],
             outputs=[output, stats_md],
+            show_progress="minimal",
         )
         clear_btn.click(fn=_clear_dataset, outputs=output).then(fn=_dataset_stats, outputs=stats_md)
 

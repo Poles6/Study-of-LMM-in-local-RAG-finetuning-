@@ -1,4 +1,5 @@
 from typing import List, Optional
+import time
 import PyPDF2
 import ollama
 import gradio as gr
@@ -121,6 +122,7 @@ def answer_questions(document_file, question_file, model_name: Optional[str] = N
 
     prompt = build_prompt(document_text, questions)
 
+    start_time = time.time()
     try:
         response = ollama.generate(
             model=model_name,
@@ -132,15 +134,18 @@ def answer_questions(document_file, question_file, model_name: Optional[str] = N
         )
 
         if hasattr(response, "response"):
-            return response.response.strip()
+            result = response.response.strip()
+        elif isinstance(response, dict):
+            result = response.get("response", "").strip()
+        else:
+            result = str(response).strip()
 
-        if isinstance(response, dict):
-            return response.get("response", "").strip()
-
-        return str(response).strip()
+        elapsed = time.time() - start_time
+        return f"{result}\n\n---\n⏱️ Tiempo: {elapsed:.1f}s"
 
     except Exception as e:
-        return f"Error al generar respuesta: {e}"
+        elapsed = time.time() - start_time
+        return f"Error al generar respuesta: {e}\n\n⏱️ Tiempo hasta error: {elapsed:.1f}s"
 
 
 def build_interface():
@@ -192,7 +197,8 @@ Recomendación: usa `llama3:latest` o `mathstral:latest` para esta tarea.
         run_btn.click(
             fn=answer_questions,
             inputs=[doc_in, q_in, model_dropdown],
-            outputs=output
+            outputs=output,
+            show_progress="minimal"
         )
 
     return demo

@@ -16,6 +16,8 @@ También puedes usar este chat para comparar lado a lado el modelo
 base y el fine-tuned seleccionando uno u otro en el desplegable.
 """
 
+import time
+
 import ollama
 import gradio as gr
 
@@ -40,6 +42,8 @@ def chat(message: str, history: list, model: str, system_prompt: str):
         history.append((message, "⚠️ Selecciona un modelo primero."))
         return "", history
 
+    start_time = time.time()
+    
     # Construir historial completo
     messages = []
     if system_prompt.strip():
@@ -56,8 +60,11 @@ def chat(message: str, history: list, model: str, system_prompt: str):
             options={"temperature": 0.2, "num_predict": 500},
         )
         reply = response.message.content.strip()
+        elapsed = time.time() - start_time
+        reply += f"\n\n_⏱️ {elapsed:.1f}s_"
     except Exception as e:
-        reply = f"❌ Error: {e}"
+        elapsed = time.time() - start_time
+        reply = f"❌ Error: {e}\n\n_⏱️ {elapsed:.1f}s_"
 
     history.append((message, reply))
     return "", history
@@ -101,11 +108,13 @@ similares a las del entrenamiento para evaluar lo que aprendió.
             fn=chat,
             inputs=[msg_box, chatbot, model_dd, system_box],
             outputs=[msg_box, chatbot],
+            show_progress="minimal",
         )
         msg_box.submit(
             fn=chat,
             inputs=[msg_box, chatbot, model_dd, system_box],
             outputs=[msg_box, chatbot],
+            show_progress="minimal",
         )
         clear_btn.click(fn=lambda: ([], ""), outputs=[chatbot, msg_box])
 

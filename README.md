@@ -81,7 +81,7 @@ Cada ejecución **añade ejemplos** al archivo `dataset.jsonl` existente. Puedes
 Inicia el proceso de entrenamiento utilizando el dataset generado:
 
 ```bash
-python finetune_qlora.py --base_model Qwen/Qwen2.5-3B-Instruct
+python finetune_qlora.py --base_model qwen3-vl:4b
 ```
 
 **Argumentos disponibles:**
