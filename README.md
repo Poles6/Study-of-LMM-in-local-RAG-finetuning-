@@ -81,11 +81,11 @@ Cada ejecución **añade ejemplos** al archivo `dataset.jsonl` existente. Puedes
 Inicia el proceso de entrenamiento utilizando el dataset generado:
 
 ```bash
-python finetune_qlora.py --base_model qwen3-vl:4b
+python finetune_qlora.py --base_model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --epochs 3
 ```
 
 **Argumentos disponibles:**
-- `--base_model`: Modelo de HuggingFace (obligatorio, ej: `qwen3-vl:4b`)
+- `--base_model`: Modelo de HuggingFace (obligatorio, ej: `Qwen/Qwen2.5-3B-Instruct`)
 - `--dataset`: Ruta al JSONL (default: `dataset.jsonl`)
 - `--output`: Directorio para guardar el adapter (default: `adapter_out`)
 - `--epochs`: Épocas de entrenamiento (default: `3`)
@@ -109,7 +109,7 @@ Una vez finalizado el entrenamiento, integra el modelo para usarlo localmente:
 
 ```bash
 # 1. Descarga el modelo base en Ollama (solo la primera vez)
-ollama pull qwen2.5-3b-instruct
+ollama pull tinyllama
 
 # 2. Importa el adapter entrenado
 ollama create mi_modelo_ft -f adapter_out/Modelfile

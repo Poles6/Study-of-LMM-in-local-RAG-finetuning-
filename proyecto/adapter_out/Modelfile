@@ -1,0 +1,7 @@
+# Importa el adapter fine-tuned en Ollama.
+# IMPORTANTE: el modelo base en Ollama debe ser exactamente el mismo
+# que usaste en --base_model (TinyLlama/TinyLlama-1.1B-Chat-v1.0).
+
+FROM tinyllama
+ADAPTER C:\Users\jorge\UNI\Practicas Ciemat\proyecto\adapter_out
+SYSTEM "Eres un experto en análisis de artículos científicos. Responde siempre en español de forma breve y directa. Si la información no está disponible, di: No se indica en el documento."
